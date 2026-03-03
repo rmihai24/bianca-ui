@@ -1,0 +1,329 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bianca - Voice Interface</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+      color: #ff1111;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .container {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-around;
+      align-items: center;
+      padding: 20px;
+      position: relative;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .title {
+      font-size: 32px;
+      font-weight: bold;
+      text-shadow: 0 0 20px #ff1111, 0 0 40px #ff1111;
+      animation: glow 2s ease-in-out infinite;
+      letter-spacing: 2px;
+    }
+
+    @keyframes glow {
+      0%, 100% { text-shadow: 0 0 20px #ff1111, 0 0 40px #ff1111; }
+      50% { text-shadow: 0 0 40px #ff1111, 0 0 80px #ff1111; }
+    }
+
+    .status {
+      font-size: 12px;
+      color: #ff9999;
+      margin-top: 10px;
+      letter-spacing: 1px;
+    }
+
+    .status.listening::before {
+      content: '● ';
+      color: #00ff00;
+      animation: pulse-dot 1s infinite;
+    }
+
+    .status.thinking::before {
+      content: '◐ ';
+      color: #ffff00;
+      animation: spin 1s linear infinite;
+    }
+
+    .status.speaking::before {
+      content: '♪ ';
+      color: #ff6600;
+      animation: bounce 0.5s infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-5px); }
+    }
+
+    .display-panel {
+      background: rgba(10, 10, 10, 0.8);
+      border: 2px solid #ff1111;
+      border-radius: 5px;
+      padding: 20px;
+      width: 100%;
+      max-width: 500px;
+      height: 150px;
+      overflow-y: auto;
+      box-shadow: 0 0 20px rgba(255, 17, 17, 0.3), inset 0 0 10px rgba(255, 17, 17, 0.1);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .display-panel::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .display-panel::-webkit-scrollbar-track {
+      background: rgba(255, 17, 17, 0.1);
+      border-radius: 3px;
+    }
+
+    .display-panel::-webkit-scrollbar-thumb {
+      background: #ff1111;
+      border-radius: 3px;
+    }
+
+    .command-input {
+      width: 100%;
+      max-width: 500px;
+      padding: 12px;
+      background: rgba(10, 10, 10, 0.9);
+      border: 2px solid #ff1111;
+      border-radius: 5px;
+      color: #ff1111;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      outline: none;
+      transition: all 0.3s ease;
+      box-shadow: 0 0 10px rgba(255, 17, 17, 0.2);
+    }
+
+    .command-input:focus {
+      box-shadow: 0 0 20px rgba(255, 17, 17, 0.5), inset 0 0 5px rgba(255, 17, 17, 0.1);
+      border-color: #ff6666;
+    }
+
+    .command-input::placeholder {
+      color: #ff6666;
+    }
+
+    .button-group {
+      display: flex;
+      gap: 15px;
+      margin-top: 20px;
+    }
+
+    button {
+      padding: 10px 20px;
+      background: rgba(255, 17, 17, 0.1);
+      border: 2px solid #ff1111;
+      color: #ff1111;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      cursor: pointer;
+      border-radius: 3px;
+      transition: all 0.3s ease;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    button:hover {
+      background: rgba(255, 17, 17, 0.3);
+      box-shadow: 0 0 15px rgba(255, 17, 17, 0.5);
+      transform: scale(1.05);
+    }
+
+    button:active {
+      transform: scale(0.95);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .info-line {
+      font-size: 10px;
+      color: #ff9999;
+      margin-top: 20px;
+      letter-spacing: 1px;
+      opacity: 0.7;
+    }
+
+    .scanner {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, #ff1111, transparent);
+      animation: scan 3s linear infinite;
+    }
+
+    @keyframes scan {
+      0% { top: 0; }
+      100% { top: 100vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="scanner"></div>
+  
+  <div class="container">
+    <div class="header">
+      <div class="title">⬢ BIANCA ⬢</div>
+      <div class="status">Sistema Operativo</div>
+    </div>
+
+    <div class="display-panel" id="responseDisplay">
+      <div style="color: #ff6666;">Sistema iniciado...</div>
+      <div>Escaneando puertos...</div>
+      <div>Cargando interfaz...</div>
+      <div style="color: #00ff00;">✓ Conexión establecida</div>
+      <div style="margin-top: 10px;">Bianca lista para recibir comandos</div>
+    </div>
+
+    <input 
+      type="text" 
+      class="command-input" 
+      id="commandInput" 
+      placeholder="Ingresa tu comando aquí..."
+      autocomplete="off"
+    >
+
+    <div class="button-group">
+      <button id="sendBtn">Enviar</button>
+      <button id="clearBtn">Limpiar</button>
+    </div>
+
+    <div class="info-line">v1.0.0 | OpenClaw Gateway | Ready</div>
+  </div>
+
+  <script>
+    const responseDisplay = document.getElementById('responseDisplay');
+    const commandInput = document.getElementById('commandInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const status = document.querySelector('.status');
+
+    // Función para agregar mensajes al display
+    function addMessage(message, type = 'normal') {
+      const msgDiv = document.createElement('div');
+      
+      if (type === 'user') {
+        msgDiv.style.color = '#ffff00';
+        msgDiv.innerHTML = `> ${message}`;
+      } else if (type === 'response') {
+        msgDiv.style.color = '#00ff00';
+        msgDiv.innerHTML = `✓ ${message}`;
+      } else if (type === 'error') {
+        msgDiv.style.color = '#ff6666';
+        msgDiv.innerHTML = `⚠ ${message}`;
+      } else {
+        msgDiv.innerHTML = message;
+      }
+      
+      responseDisplay.appendChild(msgDiv);
+      responseDisplay.scrollTop = responseDisplay.scrollHeight;
+    }
+
+    // Cambiar estado
+    function setStatus(text, type = 'normal') {
+      status.textContent = text;
+      status.className = `status ${type}`;
+    }
+
+    // Enviar comando
+    async function sendCommand() {
+      const command = commandInput.value.trim();
+      
+      if (!command) return;
+
+      addMessage(command, 'user');
+      commandInput.value = '';
+      sendBtn.disabled = true;
+      setStatus('Procesando...', 'thinking');
+
+      try {
+        const result = await window.biancaAPI.executeCommand(command);
+        
+        if (result.error) {
+          addMessage(`Error: ${result.error}`, 'error');
+        } else {
+          addMessage(result.response || 'Comando ejecutado', 'response');
+          
+          // Hacer que hable
+          if (result.response) {
+            setStatus('Hablando...', 'speaking');
+            await window.biancaAPI.speak(result.response);
+            setStatus('Sistema Operativo', 'normal');
+          }
+        }
+      } catch (error) {
+        addMessage(`Error: ${error.message}`, 'error');
+      }
+
+      sendBtn.disabled = false;
+      setStatus('Sistema Operativo', 'normal');
+      commandInput.focus();
+    }
+
+    // Event listeners
+    sendBtn.addEventListener('click', sendCommand);
+    clearBtn.addEventListener('click', () => {
+      responseDisplay.innerHTML = '';
+      commandInput.value = '';
+      addMessage('Consola limpiada', 'normal');
+      commandInput.focus();
+    });
+
+    commandInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') sendCommand();
+    });
+
+    // Saludo inicial
+    setTimeout(() => {
+      addMessage('Bianca Online - Lista para tu asistencia', 'response');
+      window.biancaAPI.speak('Bianca en línea y lista');
+    }, 500);
+
+    commandInput.focus();
+  </script>
+</body>
+</html>
