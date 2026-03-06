@@ -291,97 +291,221 @@ class BiancaAgent {
       return 'Error: No se encontró la clave de API de Anthropic. Verifica agents/main/agent/auth-profiles.json';
     }
 
+    // ── Context snapshot ────────────────────────────────────────────────────
     const now = new Date();
     const fechaActual = now.toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const horaActual = now.toLocaleTimeString('es-ES');
-    const memInfo = await this.checkMemory().catch(() => 'no disponible');
-    const windows = await this.getActiveWindows();
-    const windowsStr = windows.length > 0
-      ? `Ventanas abiertas: ${windows.join(' | ')}`
-      : 'No hay ventanas visibles detectadas.';
+    const horaActual  = now.toLocaleTimeString('es-ES');
+    const memInfo     = await this.checkMemory().catch(() => 'no disponible');
+    const windows     = await this.getActiveWindows();
+    const windowsStr  = windows.length > 0
+      ? windows.join(' | ')
+      : 'ninguna ventana visible';
 
-    let screenshot = null;
+    // Capture screenshot upfront if the request seems visual
+    let initialScreenshot = null;
     if (options.withVision) {
-      screenshot = await this.takeScreenshot();
-      if (screenshot) console.log('[Vision] Screenshot captured for Claude.');
-      else console.warn('[Vision] Screenshot failed, proceeding without image.');
+      initialScreenshot = await this.takeScreenshot();
+      if (initialScreenshot) console.log('[Vision] Screenshot captured for first message.');
+      else                    console.warn('[Vision] Screenshot unavailable, continuing without it.');
     }
 
+    // ── System prompt (ReAct / Jarvis mode) ─────────────────────────────────
+    const systemPrompt = [
+      'Eres Bianca, asistente autónoma estilo Jarvis en Windows. Responde SIEMPRE en español, texto plano sin markdown ni asteriscos.',
+      `Sistema — Fecha: ${fechaActual} | Hora: ${horaActual} | ${memInfo}`,
+      `Ventanas abiertas ahora: ${windowsStr}`,
+      '',
+      'MODO AGENTE (ciclo ReAct):',
+      'Paso 1 — Analiza la petición del usuario.',
+      'Paso 2 — Si necesitas ejecutar algo, escribe UNA sola línea:',
+      '  ACCION: {"herramienta":"<nombre>", ...parámetros...}',
+      'Paso 3 — El sistema ejecutará la acción y te devolverá:',
+      '  RESULTADO: <output>',
+      'Paso 4 — Continúa el ciclo hasta completar la tarea; luego da tu respuesta final al usuario (sin ACCION ni RESULTADO).',
+      '',
+      'Herramientas disponibles:',
+      '  {"herramienta":"ejecutar","comando":"<powershell>"}  — ejecuta un comando PowerShell',
+      '  {"herramienta":"abrir","app":"<nombre>"}             — abre una aplicación; si ya está abierta la activa',
+      '  {"herramienta":"nueva_pestana"}                      — abre una nueva pestaña en el navegador activo',
+      '  {"herramienta":"screenshot"}                         — captura pantalla para analizarla',
+      '  {"herramienta":"crear_archivo","ruta":"<ruta>","contenido":"<texto>"}  — crea o sobreescribe un archivo',
+      '  {"herramienta":"buscar_web","consulta":"<texto>"}    — abre Chrome con la búsqueda en Google',
+      '',
+      'REGLAS:',
+      '  - Antes de abrir una app, comprueba la lista "Ventanas abiertas" para no lanzarla dos veces.',
+      '  - Si Chrome ya está abierto y necesitas una nueva pestaña, usa herramienta "nueva_pestana".',
+      '  - Escribe siempre tu razonamiento/explicación ANTES de la línea ACCION.',
+      '  - Nunca respondas SOLO con ACCION sin explicación previa.',
+      '  - Si la tarea ya está completa, responde directamente sin más ACCIONes.'
+    ].join('\n');
+
+    // ── First user message ───────────────────────────────────────────────────
+    const firstContent = initialScreenshot
+      ? [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: initialScreenshot } },
+          { type: 'text', text: input }
+        ]
+      : input;
+
+    const messages = [{ role: 'user', content: firstContent }];
+
+    // ── ReAct loop ───────────────────────────────────────────────────────────
+    const MAX_ITERATIONS = 6;
+    for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+      const rawText = await this._callClaude(systemPrompt, messages);
+
+      // Parse ACCION: {...} — must be on its own line
+      const actionMatch = rawText.match(/^ACCION:\s*(\{[\s\S]*?\})\s*$/m);
+
+      if (!actionMatch) {
+        // No more actions → final answer
+        const finalText = rawText.replace(/^RESULTADO:.*$/gm, '').trim();
+        this.logToMemory(`[CLAUDE] Q: ${input.substring(0,80)} | A: ${finalText.substring(0,80)}`);
+        return finalText;
+      }
+
+      // Execute the requested action
+      let actionResult;
+      try {
+        const action = JSON.parse(actionMatch[1]);
+        console.log(`[ReAct:${iter}] herramienta=${action.herramienta}`, JSON.stringify(action).substring(0, 100));
+        actionResult = await this.executeAction(action);
+      } catch (e) {
+        actionResult = `Error parseando ACCION: ${e.message}`;
+      }
+
+      console.log(`[ReAct:${iter}] resultado: ${actionResult.substring(0, 120)}`);
+
+      // If Claude captured a screenshot, include the image in the next RESULTADO message
+      messages.push({ role: 'assistant', content: rawText });
+      if (this._pendingScreenshot) {
+        const b64 = this._pendingScreenshot;
+        this._pendingScreenshot = null;
+        messages.push({ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
+          { type: 'text', text: 'RESULTADO: Screenshot adjunto. Analiza la pantalla y continúa.' }
+        ]});
+      } else {
+        messages.push({ role: 'user', content: `RESULTADO: ${actionResult}` });
+      }
+    }
+
+    return 'Se alcanzó el límite de pasos del agente. Intenta con una petición más simple o divídela en partes.';
+  }
+
+  // Low-level Anthropic API call — returns raw text from Claude
+  async _callClaude(systemPrompt, messages) {
     return new Promise((resolve) => {
-      const systemPrompt = [
-        'Eres Bianca, asistente autónoma con control TOTAL de Windows. Responde SIEMPRE en español, texto plano sin markdown ni asteriscos.',
-        `Sistema — Fecha: ${fechaActual} | Hora: ${horaActual} | ${memInfo} | ${windowsStr}.`,
-        'PUEDES EJECUTAR ACCIONES reales poniendo cada comando en una línea que empiece exactamente con "CMD: " seguido del comando PowerShell. Ejemplos:',
-        'Abrir Chrome → CMD: Start-Process chrome',
-        'Nueva pestaña Chrome ya abierto → CMD: Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::AppActivate("chrome"); Start-Sleep -Milliseconds 300; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^t")',
-        'Abrir Notepad → CMD: Start-Process notepad',
-        'Crear archivo → CMD: Set-Content -Path "$env:USERPROFILE\\Desktop\\nota.txt" -Value "contenido"',
-        'IMPORTANTE: escribe PRIMERO tu explicación/respuesta en texto, LUEGO pon las líneas CMD: al final. Nunca respondas solo con CMD: sin texto explicativo.'
-      ].join(' ');
-
-      const userContent = screenshot
-        ? [
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshot } },
-            { type: 'text', text: input }
-          ]
-        : input;
-
-      const body = JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userContent }]
-      });
-
+      const body       = JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 1024, system: systemPrompt, messages });
       const bodyBuffer = Buffer.from(body, 'utf8');
 
-      const reqOptions = {
+      const req = https.request({
         hostname: 'api.anthropic.com',
         port: 443,
         path: '/v1/messages',
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': bodyBuffer.length,
+          'Content-Type':    'application/json',
+          'Content-Length':  bodyBuffer.length,
           'anthropic-version': '2023-06-01',
-          'x-api-key': ANTHROPIC_API_KEY
+          'x-api-key':       ANTHROPIC_API_KEY
         }
-      };
-
-      const req = https.request(reqOptions, (res) => {
+      }, (res) => {
         let data = '';
-        res.on('data', (chunk) => { data += chunk.toString(); });
+        res.on('data', (c) => { data += c.toString(); });
         res.on('end', () => {
           try {
-            const response = JSON.parse(data);
-            if (response.error) {
-              console.warn('[Claude] API error:', response.error.message);
-              resolve(`Error de IA: ${response.error.message}`);
-              return;
-            }
-            const text = response.content?.[0]?.text || 'Sin respuesta de la IA.';
-            this.logToMemory(`[CLAUDE] Q: ${input.substring(0, 80)} | A: ${text.substring(0, 80)}`);
-            this.executeClaudeActions(text).then(resolve);
-          } catch (e) {
-            console.warn('[Claude] Parse error:', e.message, data.substring(0, 100));
-            resolve('Error al procesar la respuesta de la IA.');
+            const parsed = JSON.parse(data);
+            if (parsed.error) { resolve(`Error API: ${parsed.error.message}`); return; }
+            resolve(parsed.content?.[0]?.text || 'Sin respuesta.');
+          } catch {
+            resolve('Error al parsear respuesta de la IA.');
           }
         });
       });
 
-      req.on('error', (error) => {
-        console.warn('[Claude] HTTPS error:', error.message);
-        resolve(`Error de conexión con la IA: ${error.message}`);
-      });
-
-      req.setTimeout(35000, () => {
-        req.destroy();
-        resolve('Timeout: La IA tardó demasiado en responder. Inténtalo de nuevo.');
-      });
-
+      req.on('error', (e) => resolve(`Error de conexión: ${e.message}`));
+      req.setTimeout(35000, () => { req.destroy(); resolve('Timeout esperando respuesta de la IA.'); });
       req.write(bodyBuffer);
       req.end();
     });
+  }
+
+  // Execute a structured JSON action emitted by Claude
+  async executeAction(action) {
+    switch (action.herramienta) {
+
+      // Run arbitrary PowerShell — command goes in a temp .ps1 to avoid inline escaping issues
+      case 'ejecutar': {
+        const scriptPath = path.join(os.tmpdir(), `bianca_exec_${Date.now()}.ps1`);
+        return new Promise((resolve) => {
+          try {
+            fs.writeFileSync(scriptPath, action.comando || '', 'utf8');
+            exec(
+              `"${POWERSHELL_PATH}" -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
+              { timeout: 15000, windowsHide: true },
+              (err, stdout, stderr) => {
+                try { fs.unlinkSync(scriptPath); } catch {}
+                resolve(((stdout || stderr || err?.message || 'OK').trim()).substring(0, 500));
+              }
+            );
+          } catch (e) { resolve(`Error: ${e.message}`); }
+        });
+      }
+
+      // Open an application — activate it if already running
+      case 'abrir': {
+        const appName  = (action.app || '').toLowerCase().trim();
+        const wins     = await this.getActiveWindows();
+        const isOpen   = wins.some(w => w.toLowerCase().includes(appName));
+        const psScript = isOpen
+          ? `Add-Type -AssemblyName Microsoft.VisualBasic\n[Microsoft.VisualBasic.Interaction]::AppActivate("${appName}")`
+          : `Start-Process "${appName}"`;
+        return await this.executeAction({ herramienta: 'ejecutar', comando: psScript });
+      }
+
+      // Open a new browser tab (Ctrl+T) in the foreground browser window
+      case 'nueva_pestana': {
+        const ps = [
+          'Add-Type -AssemblyName Microsoft.VisualBasic',
+          '$browsers = @("chrome","firefox","msedge","opera")',
+          '$found = Get-Process | Where-Object { $browsers -contains $_.ProcessName.ToLower() -and $_.MainWindowTitle -ne "" } | Select-Object -First 1',
+          'if ($found) { [Microsoft.VisualBasic.Interaction]::AppActivate($found.Id); Start-Sleep -Milliseconds 400 }',
+          'Add-Type -AssemblyName System.Windows.Forms',
+          '[System.Windows.Forms.SendKeys]::SendWait("^t")',
+          'Write-Output "Nueva pestaña enviada"'
+        ].join('\n');
+        return await this.executeAction({ herramienta: 'ejecutar', comando: ps });
+      }
+
+      // Capture screen and return base64 for Claude to inspect
+      case 'screenshot': {
+        const b64 = await this.takeScreenshot();
+        if (!b64) return 'No se pudo capturar la pantalla.';
+        // Inject the image into the NEXT user message by storing it temporarily
+        this._pendingScreenshot = b64;
+        return 'Screenshot capturado. Analizando...';
+      }
+
+      // Create or overwrite a file safely (single-quotes escaped)
+      case 'crear_archivo': {
+        const ruta      = (action.ruta     || '').replace(/'/g, "''");
+        const contenido = (action.contenido || '').replace(/'/g, "''");
+        const ps = `$dir = Split-Path '${ruta}'; if ($dir -and !(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }; Set-Content -Path '${ruta}' -Value '${contenido}' -Encoding UTF8`;
+        return await this.executeAction({ herramienta: 'ejecutar', comando: ps });
+      }
+
+      // Open Google search in the default/Chrome browser
+      case 'buscar_web': {
+        const q   = encodeURIComponent(action.consulta || '');
+        const url = `https://www.google.com/search?q=${q}`;
+        const ps  = `Start-Process "chrome" "${url}"`;
+        return await this.executeAction({ herramienta: 'ejecutar', comando: ps });
+      }
+
+      default:
+        return `Herramienta desconocida: "${action.herramienta}". Disponibles: ejecutar, abrir, nueva_pestana, screenshot, crear_archivo, buscar_web`;
+    }
   }
 
   async takeScreenshot() {
@@ -432,32 +556,8 @@ class BiancaAgent {
   }
 
   async executeClaudeActions(text) {
-    const cmdRegex = /^CMD:\s*(.+)$/gm;
-    let match;
-    const executed = [];
-    while ((match = cmdRegex.exec(text)) !== null) {
-      const command = match[1].trim();
-      console.log('[Action] Executing:', command.substring(0, 80));
-      const scriptPath = path.join(os.tmpdir(), `bianca_action_${Date.now()}.ps1`);
-      const result = await new Promise((resolve) => {
-        try {
-          fs.writeFileSync(scriptPath, command, 'utf8');
-          exec(
-            `"${POWERSHELL_PATH}" -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
-            { timeout: 15000, windowsHide: true },
-            (error, stdout, stderr) => {
-              try { fs.unlinkSync(scriptPath); } catch {}
-              resolve(((stdout || stderr || '').trim()).substring(0, 300));
-            }
-          );
-        } catch (e) { resolve(`Error: ${e.message}`); }
-      });
-      executed.push(result ? `Ejecutado: ${result}` : 'Acción ejecutada.');
-    }
-    const cleanText = text.replace(/^CMD:\s*.+\n?/gm, '').trim();
-    return executed.length > 0
-      ? cleanText + (cleanText ? '\n\n' : '') + executed.join('\n')
-      : cleanText;
+    // Legacy method — kept for compatibility. New code uses executeAction() via ReAct loop.
+    return text;
   }
 
   async getTime() {
