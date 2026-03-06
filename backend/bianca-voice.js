@@ -5,15 +5,11 @@
  *
  * STT : OpenAI Whisper API  (alta precisión, requiere API key)
  * TTS : Windows SAPI via PowerShell  /  espeak-ng en Linux  (local, sin coste)
- * MIC : node-record-lpcm16 + SoX  (cross-platform)
+ * MIC : mic_capture.py + sounddevice/PortAudio  (Python, cross-platform)
  *
  * ─── Instalación ────────────────────────────────────────────────────────────
- *   cd workspace/bianca-ui
- *   npm install node-record-lpcm16
- *
- *   Windows : choco install sox
- *             (o descarga manual: https://sourceforge.net/projects/sox/)
- *   Linux   : sudo apt install sox espeak-ng
+ *   Python 3.8+  +  pip install sounddevice numpy
+ *   Linux: sudo apt install espeak-ng
  *
  * ─── Clave OpenAI (necesaria para STT) ─────────────────────────────────────
  *   Edita agents/main/agent/auth-profiles.json y añade dentro de "profiles":
@@ -39,6 +35,24 @@ const os     = require('os');
 const IS_WINDOWS  = os.platform() === 'win32';
 const POWERSHELL  = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
+/**
+ * Locate the Python executable at runtime.
+ * Falls back to 'python' (then 'python3') if not already in PATH.
+ */
+function _resolvePythonPath() {
+  const { execSync } = require('child_process');
+  for (const cmd of ['python', 'python3', 'py']) {
+    try {
+      const v = execSync(`${cmd} --version`, { timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+      if (/python/i.test(v)) return cmd;
+    } catch { /* not found */ }
+  }
+  return 'python'; // last fallback
+}
+
+const PYTHON_PATH = _resolvePythonPath();
+const MIC_SCRIPT  = path.join(__dirname, 'mic_capture.py');
+
 // ── Paths (resolved relative to this file) ────────────────────────────────────
 // bianca-voice.js lives in bianca-ui/backend/
 const BACKEND_DIR   = __dirname;
@@ -55,7 +69,10 @@ const SAMPLE_RATE   = 16000;   // Hz — Whisper requires 16 kHz mono PCM
 // ── Load OpenAI API key (from auth-profiles.json or env) ──────────────────────
 function _loadOpenAIKey() {
   try {
-    const auth = JSON.parse(fs.readFileSync(AUTH_PATH, 'utf8'));
+    let raw = fs.readFileSync(AUTH_PATH, 'utf8');
+    // Strip UTF-8 BOM that PowerShell sometimes writes
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    const auth = JSON.parse(raw);
     const key  = auth?.profiles?.['openai:default']?.key;
     if (key && key.startsWith('sk-')) return key;
   } catch { /* file missing or malformed */ }
@@ -187,13 +204,18 @@ class BiancaVoice extends EventEmitter {
     this.isReady      = false;
 
     // Internal state
-    this._recorder     = null;   // node-record-lpcm16 instance
+    this._recorder     = null;   // Python mic_capture.py child process
     this._audioChunks  = [];     // raw PCM accumulation (Int16 LE)
     this._silenceTimer = null;   // fires after silence to flush audio
     this._wakeActive   = false;  // true after wake word detected
     this._wakeTimer    = null;   // auto-expire wake state
     this._ttsQueue     = Promise.resolve();  // serialise TTS calls
     this._speaking     = false;  // VAD mute flag
+
+    // Prevent unhandled 'error' event from crashing the Node process
+    this.on('error', (err) => {
+      this._log(`[error] ${err?.message || err}`, true);
+    });
 
     // Load OpenAI key once at construction
     this._openAIKey = _loadOpenAIKey();
@@ -250,14 +272,23 @@ class BiancaVoice extends EventEmitter {
       );
     }
 
-    // Check node-record-lpcm16
+    // Check Python + mic_capture.py availability
     let micOk = false;
-    try   { require.resolve('node-record-lpcm16'); micOk = true; }
-    catch {
+    try {
+      const { execSync } = require('child_process');
+      execSync(`${PYTHON_PATH} -c "import sounddevice, numpy"`, {
+        timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+      });
+      micOk = fs.existsSync(MIC_SCRIPT);
+      if (!micOk) {
+        this._log(`[WARN] mic_capture.py no encontrado en: ${MIC_SCRIPT}`, true);
+      } else {
+        this._log(`Micrófono: Python sounddevice OK (${PYTHON_PATH})`);
+      }
+    } catch {
       this._log(
-        '[WARN] Micrófono no disponible. Instala:\n' +
-        '  npm install node-record-lpcm16\n' +
-        (IS_WINDOWS ? '  choco install sox' : '  sudo apt install sox'), true
+        '[WARN] Micrófono no disponible. Requiere Python + sounddevice:\n' +
+        '  pip install sounddevice numpy', true
       );
     }
 
@@ -309,7 +340,7 @@ class BiancaVoice extends EventEmitter {
     clearTimeout(this._wakeTimer);
     this._silenceTimer = null;
     if (this._recorder) {
-      try { this._recorder.stop(); } catch { /* ignore */ }
+      try { this._recorder.kill(); } catch { /* ignore */ }
       this._recorder = null;
     }
     this._audioChunks = [];
@@ -361,49 +392,60 @@ class BiancaVoice extends EventEmitter {
       requireWakeWord: this.opts.requireWakeWord,
       language       : this.opts.language,
       platform       : os.platform(),
+      micBackend     : `python sounddevice (${PYTHON_PATH})`,
     };
   }
 
   // ── Private: Recorder ──────────────────────────────────────────────────────
 
   _startRecorder() {
-    let record;
-    try { record = require('node-record-lpcm16'); }
-    catch {
-      this._log('node-record-lpcm16 no encontrado. Ejecuta: npm install node-record-lpcm16', true);
+    if (!fs.existsSync(MIC_SCRIPT)) {
+      this._log(`mic_capture.py no encontrado en: ${MIC_SCRIPT}`, true);
       this.isListening = false;
       return;
     }
 
+    this._log(`Iniciando micrófono Python: ${PYTHON_PATH} ${MIC_SCRIPT} ${this.opts.sampleRate}`);
+
     try {
-      this._recorder = record.record({
-        sampleRateHertz : this.opts.sampleRate,
-        channels        : 1,
-        audioType       : 'raw',   // raw 16-bit LE PCM — matches our WAV builder
-        recorder        : 'sox',   // SoX must be installed and in PATH
-        silence         : '0',     // disable SoX's built-in silence detection
+      const proc = spawn(PYTHON_PATH, [MIC_SCRIPT, String(this.opts.sampleRate)], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       });
 
-      const stream = this._recorder.stream();
+      this._recorder = proc;
 
-      stream.on('data',  chunk  => this._onAudioChunk(chunk));
-      stream.on('error', err    => {
-        this._log(`Error de micrófono: ${err.message}`, true);
+      proc.on('error', (err) => {
+        this._log(`Error proceso Python mic: ${err.message}`, true);
         this.emit('error', err);
         if (this.isListening && this.opts.autoReconnect) {
-          this._log('Reconectando micrófono en 3 s...');
+          this._log('Reintentando micrófono en 3 s…');
           setTimeout(() => { if (this.isListening) this._startRecorder(); }, 3000);
         }
       });
-      stream.on('end', () => {
+
+      proc.on('close', (code, signal) => {
+        this._log(`Python mic terminó (código ${code}, señal ${signal})`);
         if (this.isListening && this.opts.autoReconnect) {
           setTimeout(() => { if (this.isListening) this._startRecorder(); }, 800);
         }
       });
 
+      // Log Python stderr (contains MIC_READY, errors, sounddevice warnings)
+      proc.stderr.on('data', (data) => {
+        const msg = data.toString().trim();
+        if (msg) this._log(`[py] ${msg}`);
+      });
+
+      // Raw PCM comes from Python stdout — feed directly into VAD pipeline
+      proc.stdout.on('data', chunk => this._onAudioChunk(chunk));
+      proc.stdout.on('error', err => {
+        this._log(`Error stream stdout Python: ${err.message}`, true);
+      });
+
     } catch (e) {
-      this._log(`Error iniciando grabador: ${e.message}`, true);
-      this._log('Asegúrate de que SoX está en el PATH del sistema.', true);
+      this._log(`Error iniciando Python mic: ${e.message}`, true);
+      this._log(`Asegúrate de que Python está instalado y sounddevice disponible: pip install sounddevice numpy`, true);
       this.isListening = false;
     }
   }
