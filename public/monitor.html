@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bianca - Monitor en Tiempo Real</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #0a0a0a;
+      color: #00ff00;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.4;
+      overflow: hidden;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: auto 1fr auto;
+      gap: 1px;
+      height: 100vh;
+      background: #111;
+      padding: 5px;
+    }
+
+    header {
+      grid-column: 1 / -1;
+      background: #1a1a1a;
+      border: 1px solid #00ff00;
+      padding: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .title {
+      font-size: 14px;
+      font-weight: bold;
+      text-shadow: 0 0 10px #00ff00;
+    }
+
+    .status-bar {
+      display: flex;
+      gap: 20px;
+      font-size: 11px;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ff0000;
+    }
+
+    .status-dot.connected {
+      background: #00ff00;
+      box-shadow: 0 0 5px #00ff00;
+    }
+
+    .panel {
+      background: #0a0a0a;
+      border: 1px solid #00ff00;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-header {
+      background: #1a1a1a;
+      border-bottom: 1px solid #00ff00;
+      padding: 5px 10px;
+      font-weight: bold;
+      font-size: 11px;
+    }
+
+    .panel-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      font-size: 11px;
+    }
+
+    .log-entry {
+      margin-bottom: 5px;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+
+    .log-entry.input {
+      color: #ffff00;
+    }
+
+    .log-entry.output {
+      color: #00ff00;
+    }
+
+    .log-entry.error {
+      color: #ff0000;
+    }
+
+    .log-entry.info {
+      color: #00ffff;
+    }
+
+    .timestamp {
+      color: #666;
+      font-size: 10px;
+    }
+
+    footer {
+      grid-column: 1 / -1;
+      background: #1a1a1a;
+      border-top: 1px solid #00ff00;
+      padding: 8px 10px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+    }
+
+    .stat {
+      display: flex;
+      gap: 10px;
+    }
+
+    .memory-bar {
+      width: 100px;
+      height: 4px;
+      background: #333;
+      border: 1px solid #00ff00;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .memory-bar-fill {
+      height: 100%;
+      background: #00ff00;
+      transition: width 0.3s;
+    }
+
+    /* Scrollbar styling */
+    .panel-content::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .panel-content::-webkit-scrollbar-track {
+      background: #0a0a0a;
+    }
+
+    .panel-content::-webkit-scrollbar-thumb {
+      background: #00ff00;
+      border-radius: 4px;
+    }
+
+    .command-input {
+      display: flex;
+      gap: 5px;
+      margin-bottom: 10px;
+    }
+
+    .command-input input {
+      flex: 1;
+      background: #1a1a1a;
+      border: 1px solid #00ff00;
+      color: #00ff00;
+      padding: 5px;
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+    }
+
+    .command-input input:focus {
+      outline: none;
+      box-shadow: 0 0 10px #00ff00;
+    }
+
+    .command-input button {
+      background: #00ff00;
+      color: #000;
+      border: none;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 11px;
+    }
+
+    .command-input button:hover {
+      background: #00cc00;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .stat-box {
+      background: #1a1a1a;
+      border: 1px solid #00ff00;
+      padding: 8px;
+      font-size: 11px;
+    }
+
+    .stat-value {
+      color: #ffff00;
+      font-size: 12px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="title">? BIANCA MONITOR - SISTEMA EN VIVO ?</div>
+      <div class="status-bar">
+        <div class="status-item">
+          OpenClaw: <span class="status-dot" id="openclaw-status"></span>
+        </div>
+        <div class="status-item">
+          Backend: <span class="status-dot connected" id="backend-status"></span>
+        </div>
+        <div class="status-item">
+          Comandos: <span id="command-count">0</span>
+        </div>
+        <div class="status-item">
+          <span id="current-time">--:--:--</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="panel">
+      <div class="panel-header">?? ESTADÍSTICAS DEL SISTEMA</div>
+      <div class="panel-content">
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div>Memoria</div>
+            <div class="stat-value" id="memory-stat">--</div>
+            <div class="memory-bar">
+              <div class="memory-bar-fill" id="memory-bar" style="width: 0%"></div>
+            </div>
+          </div>
+          <div class="stat-box">
+            <div>Sesión</div>
+            <div class="stat-value" id="session-stat">-</div>
+          </div>
+          <div class="stat-box">
+            <div>Procesos Bianca</div>
+            <div class="stat-value" id="process-stat">0</div>
+          </div>
+          <div class="stat-box">
+            <div>Conexión Gateway</div>
+            <div class="stat-value" id="gateway-stat">Desconectado</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">?? ENTRADA DE COMANDOS</div>
+      <div class="panel-content">
+        <div class="command-input">
+          <input type="text" id="command-input" placeholder="Ingresa comando para Bianca...">
+          <button id="send-btn">ENVIAR</button>
+        </div>
+        <div id="quick-commands" style="display: flex; flex-wrap: wrap; gap: 5px;">
+          <button onclick="sendCommand('hora')" style="background: #333; color: #00ff00; border: 1px solid #00ff00; padding: 3px 8px; cursor: pointer;">hora</button>
+          <button onclick="sendCommand('estado')" style="background: #333; color: #00ff00; border: 1px solid #00ff00; padding: 3px 8px; cursor: pointer;">estado</button>
+          <button onclick="sendCommand('memoria')" style="background: #333; color: #00ff00; border: 1px solid #00ff00; padding: 3px 8px; cursor: pointer;">memoria</button>
+          <button onclick="sendCommand('procesos')" style="background: #333; color: #00ff00; border: 1px solid #00ff00; padding: 3px 8px; cursor: pointer;">procesos</button>
+          <button onclick="sendCommand('ayuda')" style="background: #333; color: #00ff00; border: 1px solid #00ff00; padding: 3px 8px; cursor: pointer;">ayuda</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">?? HISTORIAL DE COMANDOS</div>
+      <div class="panel-content" id="command-log">
+        <div class="log-entry info">[SISTEMA] Monitor iniciado</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">?? LOG DEL SISTEMA</div>
+      <div class="panel-content" id="system-log">
+        <div class="log-entry info">[INIT] Monitor conectando...</div>
+      </div>
+    </div>
+
+    <footer>
+      <div class="stat">
+        <span>Backend: <span id="backend-url">http://localhost:3005</span></span>
+        <span>Memoria: <span id="footer-memory">--</span></span>
+      </div>
+      <div class="stat">
+        <span>Sesión activa desde: <span id="session-time">--:--:--</span></span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    const commandLog = document.getElementById('command-log');
+    const systemLog = document.getElementById('system-log');
+    const commandInput = document.getElementById('command-input');
+    const sendBtn = document.getElementById('send-btn');
+    let commandCount = 0;
+    let sessionStart = new Date();
+
+    // Actualizar hora
+    setInterval(() => {
+      const now = new Date();
+      document.getElementById('current-time').textContent = now.toLocaleTimeString('es-ES');
+      const sessionTime = new Date(now - sessionStart);
+      document.getElementById('session-time').textContent = sessionTime.toLocaleTimeString('es-ES').substr(0, 8);
+    }, 1000);
+
+    // Agregar log
+    function addLog(message, type = 'info', logPanel = 'system') {
+      const panel = logPanel === 'system' ? systemLog : commandLog;
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      
+      const time = new Date().toLocaleTimeString('es-ES');
+      entry.innerHTML = `<span class="timestamp">[${time}]</span> ${message}`;
+      
+      panel.appendChild(entry);
+      panel.scrollTop = panel.scrollHeight;
+
+      // Limitar a 100 entradas
+      while (panel.children.length > 100) {
+        panel.removeChild(panel.firstChild);
+      }
+    }
+
+    // Enviar comando
+    async function sendCommand(cmd = null) {
+      const command = cmd || commandInput.value.trim();
+      if (!command) return;
+
+      addLog(`${' > ' + command}`, 'input', 'command');
+      commandInput.value = '';
+      commandCount++;
+      document.getElementById('command-count').textContent = commandCount;
+
+      try {
+        const response = await fetch('http://localhost:3005/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command })
+        });
+
+        const data = await response.json();
+        
+        if (data.error) {
+          addLog(`? Error: ${data.error}`, 'error', 'command');
+        } else {
+          addLog(`? ${data.response}`, 'output', 'command');
+        }
+      } catch (error) {
+        addLog(`? Network error: ${error.message}`, 'error', 'command');
+      }
+    }
+
+    // Event listeners
+    sendBtn.addEventListener('click', () => sendCommand());
+    commandInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') sendCommand();
+    });
+
+    // Actualizar estado del backend
+    async function updateStatus() {
+      try {
+        const response = await fetch('http://localhost:3005/api/status');
+        const data = await response.json();
+        
+        document.getElementById('session-stat').textContent = data.sessionId ? data.sessionId.substr(0, 12) + '...' : '-';
+        document.getElementById('gateway-stat').textContent = data.openclawConnected ? 'Conectado' : 'Desconectado';
+        document.getElementById('openclaw-status').classList.toggle('connected', data.openclawConnected);
+
+        // Fetch del status de memoria
+        const osData = await fetch('http://localhost:3005/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'memoria' })
+        });
+        const memData = await osData.json();
+        
+        // Extraer porcentaje de memoria
+        const memMatch = memData.response.match(/(\d+\.\d+)%/);
+        if (memMatch) {
+          const percent = parseFloat(memMatch[1]);
+          document.getElementById('memory-stat').textContent = `${percent.toFixed(1)}%`;
+          document.getElementById('memory-bar').style.width = `${percent}%`;
+          document.getElementById('footer-memory').textContent = `${percent.toFixed(1)}%`;
+        }
+      } catch (error) {
+        addLog(`Status update error: ${error.message}`, 'error');
+      }
+    }
+
+    // Actualizar estado cada 3 segundos
+    setInterval(updateStatus, 3000);
+    updateStatus();
+
+    // Log de inicio
+    addLog('Monitor en vivo inicializado', 'info');
+    addLog('Conectado a http://localhost:3005', 'info');
+    addLog('Escribe comandos o usa los botones rápidos', 'info');
+
+    // Auto-update de la consola
+    setInterval(() => {
+      // Cada 5 segundos, mostrar que está vivo
+      if (Math.random() > 0.7) {
+        addLog('?? Bianca activa y esperando comandos...', 'info');
+      }
+    }, 5000);
+  </script>
+</body>
+</html>

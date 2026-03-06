@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
@@ -59,19 +59,19 @@
     }
 
     .status.listening::before {
-      content: '● ';
+      content: '? ';
       color: #00ff00;
       animation: pulse-dot 1s infinite;
     }
 
     .status.thinking::before {
-      content: '◐ ';
+      content: '? ';
       color: #ffff00;
       animation: spin 1s linear infinite;
     }
 
     .status.speaking::before {
-      content: '♪ ';
+      content: '? ';
       color: #ff6600;
       animation: bounce 0.5s infinite;
     }
@@ -207,7 +207,7 @@
   
   <div class="container">
     <div class="header">
-      <div class="title">⬢ BIANCA ⬢</div>
+      <div class="title">? BIANCA ?</div>
       <div class="status">Sistema Operativo</div>
     </div>
 
@@ -215,7 +215,7 @@
       <div style="color: #ff6666;">Sistema iniciado...</div>
       <div>Escaneando puertos...</div>
       <div>Cargando interfaz...</div>
-      <div style="color: #00ff00;">✓ Conexión establecida</div>
+      <div style="color: #00ff00;">? Conexi?n establecida</div>
       <div style="margin-top: 10px;">Bianca lista para recibir comandos</div>
     </div>
 
@@ -223,7 +223,7 @@
       type="text" 
       class="command-input" 
       id="commandInput" 
-      placeholder="Ingresa tu comando aquí..."
+      placeholder="Ingresa tu comando aqu?..."
       autocomplete="off"
     >
 
@@ -242,7 +242,7 @@
     const clearBtn = document.getElementById('clearBtn');
     const status = document.querySelector('.status');
 
-    // Función para agregar mensajes al display
+    // Funci?n para agregar mensajes al display
     function addMessage(message, type = 'normal') {
       const msgDiv = document.createElement('div');
       
@@ -251,10 +251,10 @@
         msgDiv.innerHTML = `> ${message}`;
       } else if (type === 'response') {
         msgDiv.style.color = '#00ff00';
-        msgDiv.innerHTML = `✓ ${message}`;
+        msgDiv.innerHTML = `? ${message}`;
       } else if (type === 'error') {
         msgDiv.style.color = '#ff6666';
-        msgDiv.innerHTML = `⚠ ${message}`;
+        msgDiv.innerHTML = `? ${message}`;
       } else {
         msgDiv.innerHTML = message;
       }
@@ -281,17 +281,39 @@
       setStatus('Procesando...', 'thinking');
 
       try {
-        const result = await window.biancaAPI.executeCommand(command);
+        // Use HTTP fetch directly (works in web and electron via preload)
+        let result;
+        
+        if (window.biancaAPI && window.biancaAPI.executeCommand) {
+          // Electron IPC path
+          result = await window.biancaAPI.executeCommand(command);
+        } else {
+          // Web HTTP path
+          const response = await fetch('http://localhost:3005/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command })
+          });
+          result = await response.json();
+        }
         
         if (result.error) {
           addMessage(`Error: ${result.error}`, 'error');
         } else {
           addMessage(result.response || 'Comando ejecutado', 'response');
           
-          // Hacer que hable
+          // Hacer que hable (si est? disponible)
           if (result.response) {
             setStatus('Hablando...', 'speaking');
-            await window.biancaAPI.speak(result.response);
+            
+            if (window.biancaAPI && window.biancaAPI.speak) {
+              // Electron TTS
+              await window.biancaAPI.speak(result.response);
+            } else {
+              // Web just log it
+              console.log('[TTS]', result.response);
+            }
+            
             setStatus('Sistema Operativo', 'normal');
           }
         }
@@ -320,7 +342,7 @@
     // Saludo inicial
     setTimeout(() => {
       addMessage('Bianca Online - Lista para tu asistencia', 'response');
-      window.biancaAPI.speak('Bianca en línea y lista');
+      window.biancaAPI.speak('Bianca en l?nea y lista');
     }, 500);
 
     commandInput.focus();

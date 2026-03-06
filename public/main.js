@@ -16,7 +16,7 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile('public/index.html');
+  mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -26,7 +26,7 @@ function createWindow() {
 // Manejador IPC para enviar comandos al backend
 ipcMain.handle('execute-command', async (event, command) => {
   try {
-    const response = await fetch('http://localhost:3001/api/command', {
+    const response = await fetch('http://localhost:3005/api/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command })
@@ -41,7 +41,7 @@ ipcMain.handle('execute-command', async (event, command) => {
 // Manejador IPC para hacer speak (TTS)
 ipcMain.handle('speak', async (event, text) => {
   try {
-    const response = await fetch('http://localhost:3001/api/speak', {
+    const response = await fetch('http://localhost:3005/api/speak', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text })
