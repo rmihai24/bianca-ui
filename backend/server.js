@@ -127,6 +127,15 @@ app.get('/api/windows', async (req, res) => {
   }
 });
 
+app.get('/api/memory/analysis', async (req, res) => {
+  try {
+    const report = await bianca.analyzeMemory();
+    res.json(report);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // File operations
 app.post('/api/file/read', async (req, res) => {
   try {

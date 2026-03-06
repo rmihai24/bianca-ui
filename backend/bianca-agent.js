@@ -27,7 +27,12 @@ const ANTHROPIC_API_KEY = (() => {
 })();
 
 const ANTHROPIC_MODEL = 'claude-haiku-4-5';
-const SCREENSHOT_PATH = path.join(os.tmpdir(), 'bianca_screen.png');
+const SCREENSHOT_PATH    = path.join(os.tmpdir(), 'bianca_screen.png');
+
+// Bianca persistent memory (separate from debug logs)
+const BIANCA_MEMORY_DIR  = path.join(WORKSPACE, 'memory', 'bianca');
+const MEMORY_USAGE_FILE  = path.join(BIANCA_MEMORY_DIR, '_usage.json');
+const MEMORY_ANALYSIS_FILE = path.join(BIANCA_MEMORY_DIR, '_analysis.json');
 
 class BiancaAgent {
   constructor() {
@@ -45,13 +50,14 @@ class BiancaAgent {
 
   async init() {
     try {
-      if (!fs.existsSync(MEMORY_DIR)) {
-        fs.mkdirSync(MEMORY_DIR, { recursive: true });
-      }
-      // Enable OpenClaw connection
+      // Ensure all memory directories exist
+      [MEMORY_DIR, BIANCA_MEMORY_DIR].forEach(d => {
+        if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+      });
       this.connectToOpenClaw();
       this.ready = true;
       this.logToMemory(`[INIT] Bianca initialized - Session: ${this.sessionId}`);
+      this._scheduleWeeklyAnalysis();
       console.log('[Bianca] Initialized - Connecting to OpenClaw...');
       return { status: 'ok', sessionId: this.sessionId };
     } catch (error) {
@@ -291,55 +297,68 @@ class BiancaAgent {
       return 'Error: No se encontró la clave de API de Anthropic. Verifica agents/main/agent/auth-profiles.json';
     }
 
-    // ── Context snapshot ────────────────────────────────────────────────────
-    const now = new Date();
+    // ── Context snapshot ───────────────────────────────────────────
+    const now         = new Date();
     const fechaActual = now.toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const horaActual  = now.toLocaleTimeString('es-ES');
     const memInfo     = await this.checkMemory().catch(() => 'no disponible');
     const windows     = await this.getActiveWindows();
-    const windowsStr  = windows.length > 0
-      ? windows.join(' | ')
-      : 'ninguna ventana visible';
+    const windowsStr  = windows.length ? windows.join(' | ') : 'ninguna ventana visible';
+    const memFiles    = this._listMemoryFiles();
 
-    // Capture screenshot upfront if the request seems visual
     let initialScreenshot = null;
     if (options.withVision) {
       initialScreenshot = await this.takeScreenshot();
-      if (initialScreenshot) console.log('[Vision] Screenshot captured for first message.');
+      if (initialScreenshot) console.log('[Vision] Screenshot captured.');
       else                    console.warn('[Vision] Screenshot unavailable, continuing without it.');
     }
 
-    // ── System prompt (ReAct / Jarvis mode) ─────────────────────────────────
+    // ── System prompt (Jarvis + memory spec) ─────────────────────────────────
     const systemPrompt = [
-      'Eres Bianca, asistente autónoma estilo Jarvis en Windows. Responde SIEMPRE en español, texto plano sin markdown ni asteriscos.',
-      `Sistema — Fecha: ${fechaActual} | Hora: ${horaActual} | ${memInfo}`,
+      'Eres Bianca, asistente de escritorio local para Windows con voz activa. Responde SIEMPRE en español, texto plano sin asteriscos ni markdown.',
+      '',
+      'IDENTIDAD Y ROL:',
+      '- Eres una IA ejecutada localmente. No afirmes tener control total del sistema.',
+      '- Generas acciones en JSON que el sistema host ejecuta.',
+      '- Diferencia órdenes directas (empiezan con "Bianca" o tienen intención explícita) de conversación casual.',
+      '- Conversación casual: responde sin acciones; solo registra si hay info relevante del usuario.',
+      '',
+      `DATOS DEL SISTEMA — Fecha: ${fechaActual} | Hora: ${horaActual} | ${memInfo}`,
       `Ventanas abiertas ahora: ${windowsStr}`,
+      `Archivos de memoria disponibles: ${memFiles || 'ninguno'}`,
       '',
-      'MODO AGENTE (ciclo ReAct):',
-      'Paso 1 — Analiza la petición del usuario.',
-      'Paso 2 — Si necesitas ejecutar algo, escribe UNA sola línea:',
-      '  ACCION: {"herramienta":"<nombre>", ...parámetros...}',
-      'Paso 3 — El sistema ejecutará la acción y te devolverá:',
-      '  RESULTADO: <output>',
-      'Paso 4 — Continúa el ciclo hasta completar la tarea; luego da tu respuesta final al usuario (sin ACCION ni RESULTADO).',
+      'GESTIÓN DE MEMORIA:',
+      `- Directorio de memoria: ${BIANCA_MEMORY_DIR}`,
+      '- Guarda información relevante del usuario en archivos .txt dentro de ese directorio.',
+      '- Marca archivos con datos privados (contraseñas, tokens) como sensibles — usa acción encrypt_file.',
+      '- Cada vez que leas un archivo de memoria, incluye también acción "register_usage".',
       '',
-      'Herramientas disponibles:',
-      '  {"herramienta":"ejecutar","comando":"<powershell>"}  — ejecuta un comando PowerShell',
-      '  {"herramienta":"abrir","app":"<nombre>"}             — abre una aplicación; si ya está abierta la activa',
-      '  {"herramienta":"nueva_pestana"}                      — abre una nueva pestaña en el navegador activo',
-      '  {"herramienta":"screenshot"}                         — captura pantalla para analizarla',
-      '  {"herramienta":"crear_archivo","ruta":"<ruta>","contenido":"<texto>"}  — crea o sobreescribe un archivo',
-      '  {"herramienta":"buscar_web","consulta":"<texto>"}    — abre Chrome con la búsqueda en Google',
+      'FORMATO DE ACCIONES:',
+      'Si necesitas ejecutar algo, añade al FINAL de tu respuesta una sola línea:',
+      'ACCIONES: {"actions":[{"type":"...","parámetros":"..."},...]}',
       '',
-      'REGLAS:',
-      '  - Antes de abrir una app, comprueba la lista "Ventanas abiertas" para no lanzarla dos veces.',
-      '  - Si Chrome ya está abierto y necesitas una nueva pestaña, usa herramienta "nueva_pestana".',
-      '  - Escribe siempre tu razonamiento/explicación ANTES de la línea ACCION.',
-      '  - Nunca respondas SOLO con ACCION sin explicación previa.',
-      '  - Si la tarea ya está completa, responde directamente sin más ACCIONes.'
+      'Tipos de acción disponibles:',
+      '  {"type":"ejecutar","comando":"<powershell>"}',
+      '  {"type":"abrir","app":"<nombre>"}',
+      '  {"type":"nueva_pestana"}',
+      '  {"type":"screenshot"}',
+      '  {"type":"buscar_web","consulta":"<texto>"}',
+      '  {"type":"create_file","path":"<ruta>","content":"<texto>"}',
+      '  {"type":"append_file","path":"<ruta>","content":"<texto>"}',
+      '  {"type":"delete_file","path":"<ruta>"}',
+      '  {"type":"read_file","path":"<ruta>"}',
+      '  {"type":"encrypt_file","path":"<ruta>","method":"AES-256"}',
+      '  {"type":"register_usage","path":"<ruta>"}',
+      '',
+      'REGLAS CRÍTICAS:',
+      '- Escribe PRIMERO tu explicación en texto natural, LUEGO la línea ACCIONES: al final.',
+      '- Si Chrome está en la lista de ventanas y el usuario pide nueva pestaña, usa nueva_pestana.',
+      '- Para solicitudes de análisis de memoria, devuelve la clasificación y usa create_file para guardar el informe.',
+      '- Nunca respondas SOLO con ACCIONES: sin texto previo.',
+      '- Si la tarea ya está completa, responde directamente sin incluir ACCIONES.'
     ].join('\n');
 
-    // ── First user message ───────────────────────────────────────────────────
+    // ── First user message ────────────────────────────────────────
     const firstContent = initialScreenshot
       ? [
           { type: 'image', source: { type: 'base64', media_type: 'image/png', data: initialScreenshot } },
@@ -349,48 +368,51 @@ class BiancaAgent {
 
     const messages = [{ role: 'user', content: firstContent }];
 
-    // ── ReAct loop ───────────────────────────────────────────────────────────
+    // ── ReAct loop (ACCIONES format) ────────────────────────────────────────────
     const MAX_ITERATIONS = 6;
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
       const rawText = await this._callClaude(systemPrompt, messages);
 
-      // Parse ACCION: {...} — must be on its own line
-      const actionMatch = rawText.match(/^ACCION:\s*(\{[\s\S]*?\})\s*$/m);
-
-      if (!actionMatch) {
-        // No more actions → final answer
-        const finalText = rawText.replace(/^RESULTADO:.*$/gm, '').trim();
-        this.logToMemory(`[CLAUDE] Q: ${input.substring(0,80)} | A: ${finalText.substring(0,80)}`);
-        return finalText;
+      // Look for ACCIONES: {"actions":[...]} block on its own line
+      const actMatch = rawText.match(/^ACCIONES:\s*(\{[\s\S]*\})\s*$/m);
+      if (!actMatch) {
+        // No actions → this is Claude's final answer
+        this.logToMemory(`[CLAUDE] Q: ${input.substring(0,80)} | A: ${rawText.substring(0,80)}`);
+        return rawText.trim();
       }
 
-      // Execute the requested action
-      let actionResult;
+      // Parse and execute all actions in the array
+      let actionResults = [];
       try {
-        const action = JSON.parse(actionMatch[1]);
-        console.log(`[ReAct:${iter}] herramienta=${action.herramienta}`, JSON.stringify(action).substring(0, 100));
-        actionResult = await this.executeAction(action);
+        const parsed  = JSON.parse(actMatch[1]);
+        const actions = parsed.actions || [];
+        console.log(`[Agent:${iter}] ${actions.length} action(s): ${actions.map(a => a.type).join(', ')}`);
+        for (const action of actions) {
+          const res = await this.executeJsonAction(action);
+          actionResults.push(`${action.type}: ${res}`);
+        }
       } catch (e) {
-        actionResult = `Error parseando ACCION: ${e.message}`;
+        actionResults.push(`Error parseando ACCIONES: ${e.message}`);
       }
 
-      console.log(`[ReAct:${iter}] resultado: ${actionResult.substring(0, 120)}`);
+      const resultStr = actionResults.join(' | ');
+      console.log(`[Agent:${iter}] resultado: ${resultStr.substring(0, 120)}`);
 
-      // If Claude captured a screenshot, include the image in the next RESULTADO message
+      // Feed results back; inject screenshot image if one was captured
       messages.push({ role: 'assistant', content: rawText });
       if (this._pendingScreenshot) {
         const b64 = this._pendingScreenshot;
         this._pendingScreenshot = null;
         messages.push({ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
-          { type: 'text', text: 'RESULTADO: Screenshot adjunto. Analiza la pantalla y continúa.' }
+          { type: 'text', text: `RESULTADO: Screenshot adjunto. ${resultStr}` }
         ]});
       } else {
-        messages.push({ role: 'user', content: `RESULTADO: ${actionResult}` });
+        messages.push({ role: 'user', content: `RESULTADO: ${resultStr}` });
       }
     }
 
-    return 'Se alcanzó el límite de pasos del agente. Intenta con una petición más simple o divídela en partes.';
+    return 'Se alcanzó el límite de pasos. Intenta con una petición más simple o divídela en partes.';
   }
 
   // Low-level Anthropic API call — returns raw text from Claude
@@ -431,11 +453,12 @@ class BiancaAgent {
     });
   }
 
-  // Execute a structured JSON action emitted by Claude
-  async executeAction(action) {
-    switch (action.herramienta) {
+  // Execute a single JSON action from Claude's ACCIONES: block
+  async executeJsonAction(action) {
+    const type = action.type || action.herramienta || '';
+    switch (type) {
 
-      // Run arbitrary PowerShell — command goes in a temp .ps1 to avoid inline escaping issues
+      // ── PowerShell execution (temp .ps1 file avoids all inline escaping) ──
       case 'ejecutar': {
         const scriptPath = path.join(os.tmpdir(), `bianca_exec_${Date.now()}.ps1`);
         return new Promise((resolve) => {
@@ -453,59 +476,217 @@ class BiancaAgent {
         });
       }
 
-      // Open an application — activate it if already running
+      // ── Open / activate application ────────────────────────────────────────
       case 'abrir': {
-        const appName  = (action.app || '').toLowerCase().trim();
-        const wins     = await this.getActiveWindows();
-        const isOpen   = wins.some(w => w.toLowerCase().includes(appName));
-        const psScript = isOpen
+        const appName = (action.app || '').toLowerCase().trim();
+        const wins    = await this.getActiveWindows();
+        const isOpen  = wins.some(w => w.toLowerCase().includes(appName));
+        const ps = isOpen
           ? `Add-Type -AssemblyName Microsoft.VisualBasic\n[Microsoft.VisualBasic.Interaction]::AppActivate("${appName}")`
           : `Start-Process "${appName}"`;
-        return await this.executeAction({ herramienta: 'ejecutar', comando: psScript });
+        return await this.executeJsonAction({ type: 'ejecutar', comando: ps });
       }
 
-      // Open a new browser tab (Ctrl+T) in the foreground browser window
+      // ── New browser tab (Ctrl+T) ───────────────────────────────────────────
       case 'nueva_pestana': {
         const ps = [
           'Add-Type -AssemblyName Microsoft.VisualBasic',
-          '$browsers = @("chrome","firefox","msedge","opera")',
-          '$found = Get-Process | Where-Object { $browsers -contains $_.ProcessName.ToLower() -and $_.MainWindowTitle -ne "" } | Select-Object -First 1',
-          'if ($found) { [Microsoft.VisualBasic.Interaction]::AppActivate($found.Id); Start-Sleep -Milliseconds 400 }',
+          '$b = Get-Process | Where-Object { @("chrome","firefox","msedge","opera") -contains $_.ProcessName.ToLower() -and $_.MainWindowTitle -ne "" } | Select-Object -First 1',
+          'if ($b) { [Microsoft.VisualBasic.Interaction]::AppActivate($b.Id); Start-Sleep -Milliseconds 400 }',
           'Add-Type -AssemblyName System.Windows.Forms',
           '[System.Windows.Forms.SendKeys]::SendWait("^t")',
-          'Write-Output "Nueva pestaña enviada"'
+          'Write-Output "OK"'
         ].join('\n');
-        return await this.executeAction({ herramienta: 'ejecutar', comando: ps });
+        return await this.executeJsonAction({ type: 'ejecutar', comando: ps });
       }
 
-      // Capture screen and return base64 for Claude to inspect
+      // ── Capture screen → inject into next message ──────────────────────────
       case 'screenshot': {
         const b64 = await this.takeScreenshot();
-        if (!b64) return 'No se pudo capturar la pantalla.';
-        // Inject the image into the NEXT user message by storing it temporarily
+        if (!b64) return 'Screenshot no disponible.';
         this._pendingScreenshot = b64;
-        return 'Screenshot capturado. Analizando...';
+        return 'Screenshot capturado.';
       }
 
-      // Create or overwrite a file safely (single-quotes escaped)
-      case 'crear_archivo': {
-        const ruta      = (action.ruta     || '').replace(/'/g, "''");
-        const contenido = (action.contenido || '').replace(/'/g, "''");
-        const ps = `$dir = Split-Path '${ruta}'; if ($dir -and !(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }; Set-Content -Path '${ruta}' -Value '${contenido}' -Encoding UTF8`;
-        return await this.executeAction({ herramienta: 'ejecutar', comando: ps });
-      }
-
-      // Open Google search in the default/Chrome browser
+      // ── Google search ──────────────────────────────────────────────────────
       case 'buscar_web': {
-        const q   = encodeURIComponent(action.consulta || '');
-        const url = `https://www.google.com/search?q=${q}`;
-        const ps  = `Start-Process "chrome" "${url}"`;
-        return await this.executeAction({ herramienta: 'ejecutar', comando: ps });
+        const q  = encodeURIComponent(action.consulta || '');
+        const ps = `Start-Process "chrome" "https://www.google.com/search?q=${q}"`;
+        return await this.executeJsonAction({ type: 'ejecutar', comando: ps });
+      }
+
+      // ── Memory file operations (spec: create/append/delete/read/encrypt) ───
+      case 'create_file': {
+        const ruta      = action.path || '';
+        const contenido = (action.content || '').replace(/'/g, "''");
+        const safeRuta  = ruta.replace(/'/g, "''");
+        const ps = [
+          `$dir = Split-Path '${safeRuta}'`,
+          `if ($dir -and !(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }`,
+          `Set-Content -Path '${safeRuta}' -Value '${contenido}' -Encoding UTF8`
+        ].join('\n');
+        const result = await this.executeJsonAction({ type: 'ejecutar', comando: ps });
+        this.trackMemoryUsage(ruta);
+        return result || 'Archivo creado.';
+      }
+
+      case 'append_file': {
+        const ruta      = action.path || '';
+        const contenido = (action.content || '').replace(/'/g, "''");
+        const safeRuta  = ruta.replace(/'/g, "''");
+        const ps = `Add-Content -Path '${safeRuta}' -Value '${contenido}' -Encoding UTF8`;
+        const result = await this.executeJsonAction({ type: 'ejecutar', comando: ps });
+        this.trackMemoryUsage(ruta);
+        return result || 'Contenido añadido.';
+      }
+
+      case 'delete_file': {
+        const ruta     = action.path || '';
+        const safeRuta = ruta.replace(/'/g, "''");
+        const ps = `if (Test-Path '${safeRuta}') { Remove-Item '${safeRuta}' -Force; Write-Output 'Eliminado.' } else { Write-Output 'No encontrado.' }`;
+        return await this.executeJsonAction({ type: 'ejecutar', comando: ps });
+      }
+
+      case 'read_file': {
+        const ruta = action.path || '';
+        this.trackMemoryUsage(ruta);
+        if (!fs.existsSync(ruta)) return `Archivo no encontrado: ${ruta}`;
+        try {
+          const content = fs.readFileSync(ruta, 'utf8');
+          return content.substring(0, 800) + (content.length > 800 ? '\n[truncado]' : '');
+        } catch (e) { return `Error leyendo: ${e.message}`; }
+      }
+
+      // AES-256 encryption via PowerShell DPAPI (symmetric key tied to Windows user)
+      case 'encrypt_file': {
+        const ruta = (action.path || '').replace(/'/g, "''");
+        const ps = [
+          `if (!(Test-Path '${ruta}')) { Write-Output 'Archivo no encontrado'; exit }`,
+          `$plain  = Get-Content '${ruta}' -Raw -Encoding UTF8`,
+          `$bytes  = [System.Text.Encoding]::UTF8.GetBytes($plain)`,
+          `$enc    = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)`,
+          `[System.IO.File]::WriteAllBytes('${ruta}.bianca', $enc)`,
+          `Remove-Item '${ruta}' -Force`,
+          `Write-Output 'Cifrado con DPAPI (solo accesible por este usuario Windows).'`
+        ].join('\n');
+        // Need to load the assembly
+        const fullPs = `Add-Type -AssemblyName System.Security\n${ps}`;
+        this.trackMemoryUsage(action.path || '');
+        return await this.executeJsonAction({ type: 'ejecutar', comando: fullPs });
+      }
+
+      // Track file usage without any other action
+      case 'register_usage': {
+        this.trackMemoryUsage(action.path || '');
+        return 'Uso registrado.';
       }
 
       default:
-        return `Herramienta desconocida: "${action.herramienta}". Disponibles: ejecutar, abrir, nueva_pestana, screenshot, crear_archivo, buscar_web`;
+        return `Acción desconocida: "${type}"."`;
     }
+  }
+
+  // Keep legacy method name pointing to the new implementation
+  async executeAction(action) {
+    return this.executeJsonAction({ ...action, type: action.type || action.herramienta });
+  }
+
+  // Record access count and last-used date for a memory file
+  trackMemoryUsage(filePath) {
+    if (!filePath) return;
+    try {
+      let usage = {};
+      if (fs.existsSync(MEMORY_USAGE_FILE)) {
+        usage = JSON.parse(fs.readFileSync(MEMORY_USAGE_FILE, 'utf8'));
+      }
+      const key = path.basename(filePath);
+      if (!usage[key]) usage[key] = { count: 0, lastUsed: null, path: filePath };
+      usage[key].count++;
+      usage[key].lastUsed = new Date().toISOString().split('T')[0];
+      if (!fs.existsSync(BIANCA_MEMORY_DIR)) fs.mkdirSync(BIANCA_MEMORY_DIR, { recursive: true });
+      fs.writeFileSync(MEMORY_USAGE_FILE, JSON.stringify(usage, null, 2), 'utf8');
+    } catch { /* non-critical */ }
+  }
+
+  // List .txt files in Bianca memory dir (shown to Claude in system prompt)
+  _listMemoryFiles() {
+    try {
+      if (!fs.existsSync(BIANCA_MEMORY_DIR)) return '';
+      return fs.readdirSync(BIANCA_MEMORY_DIR)
+        .filter(f => f.endsWith('.txt') || f.endsWith('.bianca'))
+        .join(', ') || 'ninguno';
+    } catch { return ''; }
+  }
+
+  // Weekly memory analysis: classify files as critical / sensitive / obsolete
+  async analyzeMemory() {
+    try {
+      if (!fs.existsSync(BIANCA_MEMORY_DIR)) {
+        return { memory_analysis: [], generated: new Date().toISOString(), note: 'Directorio de memoria vacío.' };
+      }
+
+      const files = fs.readdirSync(BIANCA_MEMORY_DIR).filter(f => f.endsWith('.txt'));
+      let usage = {};
+      if (fs.existsSync(MEMORY_USAGE_FILE)) {
+        usage = JSON.parse(fs.readFileSync(MEMORY_USAGE_FILE, 'utf8'));
+      }
+
+      const today       = new Date();
+      const thirtyDaysAgo = new Date(today - 30 * 24 * 3600 * 1000);
+
+      const SENSITIVE_KEYWORDS = /contraseña|password|token|secret|clave|api.key|tarjeta|ssn|nif|dni/i;
+
+      const analysis = files.map(filename => {
+        const filepath  = path.join(BIANCA_MEMORY_DIR, filename);
+        const usageData = usage[filename] || { count: 0, lastUsed: null };
+        const lastUsed  = usageData.lastUsed ? new Date(usageData.lastUsed) : null;
+        const isOld     = !lastUsed || lastUsed < thirtyDaysAgo;
+        const count     = usageData.count || 0;
+
+        let content = '';
+        try { content = fs.readFileSync(filepath, 'utf8').substring(0, 200); } catch {}
+
+        let type, reason;
+        if (SENSITIVE_KEYWORDS.test(filename + ' ' + content)) {
+          type   = 'sensible';
+          reason = 'Contiene posibles datos privados — se recomienda cifrado AES-256.';
+        } else if (count >= 5) {
+          type   = 'critico';
+          reason = `Accedido ${count} veces. Alta frecuencia de uso.`;
+        } else if (isOld && count < 2) {
+          type   = 'obsoleto';
+          reason = 'Poco usado y sin acceso reciente. Candidato a eliminar.';
+        } else {
+          type   = 'normal';
+          reason = `Uso normal (${count} accesos).`;
+        }
+
+        return { file: filename, type, last_used: usageData.lastUsed || 'nunca', accesses: count, reason };
+      });
+
+      const report = { memory_analysis: analysis, generated: today.toISOString() };
+      fs.writeFileSync(MEMORY_ANALYSIS_FILE, JSON.stringify(report, null, 2), 'utf8');
+      return report;
+    } catch (e) {
+      return { error: e.message, memory_analysis: [] };
+    }
+  }
+
+  // Schedule automatic weekly memory analysis (runs every 7 days)
+  _scheduleWeeklyAnalysis() {
+    const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+    // Run once after 5 seconds on startup (to populate initial state), then weekly
+    setTimeout(async () => {
+      const report = await this.analyzeMemory();
+      const counts = { critico: 0, sensible: 0, obsoleto: 0, normal: 0 };
+      (report.memory_analysis || []).forEach(f => { if (counts[f.type] !== undefined) counts[f.type]++; });
+      console.log(`[Memory] Análisis semanal — críticos:${counts.critico} sensibles:${counts.sensible} obsoletos:${counts.obsoleto} normales:${counts.normal}`);
+      this.logToMemory(`[ANALYSIS] ${JSON.stringify(counts)}`);
+    }, 5000);
+    setInterval(async () => {
+      await this.analyzeMemory();
+      console.log('[Memory] Análisis semanal completado.');
+    }, WEEK_MS);
   }
 
   async takeScreenshot() {
