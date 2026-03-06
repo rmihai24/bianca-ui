@@ -23,6 +23,18 @@ dotenv.config();
 const BiancaAgent = require('./bianca-agent');
 const bianca = new BiancaAgent();
 
+// Import Bianca Voice module
+const BiancaVoice = require('./bianca-voice');
+const voice = new BiancaVoice(bianca, {
+  language        : process.env.VOICE_LANG     || 'es',
+  wakeWord        : process.env.VOICE_WAKE_WORD !== undefined ? process.env.VOICE_WAKE_WORD : 'bianca',
+  requireWakeWord : process.env.VOICE_ALWAYS_ON !== 'true',
+  ttsRate         : Number(process.env.VOICE_TTS_RATE)   ||  0,
+  ttsVolume       : Number(process.env.VOICE_TTS_VOLUME) || 90,
+  ttsVoice        : process.env.VOICE_TTS_VOICE || '',
+  silenceThreshold: Number(process.env.VOICE_SILENCE_THRESHOLD) || 300,
+});
+
 // Configuration
 const PORT = process.env.PORT || 3005;
 const WS_PORT = process.env.WS_PORT || 3006;
@@ -44,6 +56,13 @@ let agentReady = false;
 bianca.init().then((result) => {
   console.log('[Server] Bianca agent initialized:', result);
   agentReady = true;
+
+  // Initialise voice module in background (non-blocking)
+  voice.init().then(ready => {
+    if (ready) console.log('[Voice] Módulo de voz listo. Usa POST /api/voice/start para escuchar.');
+    else       console.log('[Voice] Módulo de voz disponible (revisa dependencias para STT).');
+  }).catch(e => console.error('[Voice] Error en init:', e.message));
+
 }).catch((error) => {
   console.error('[Server] Failed to initialize Bianca agent:', error);
 });
@@ -125,6 +144,43 @@ app.get('/api/windows', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// ── Voice API ──────────────────────────────────────────────────────────────
+
+// GET  /api/voice/status  — current state of the voice module
+app.get('/api/voice/status', (req, res) => {
+  res.json(voice.getStatus());
+});
+
+// POST /api/voice/start   — begin continuous microphone listening
+app.post('/api/voice/start', async (req, res) => {
+  try {
+    await voice.startListening();
+    res.json({ success: true, message: 'Escucha activa.' });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/voice/stop    — stop the microphone
+app.post('/api/voice/stop', (req, res) => {
+  voice.stopListening();
+  res.json({ success: true, message: 'Micrófono detenido.' });
+});
+
+// POST /api/voice/speak   — TTS: speak arbitrary text
+// Body: { "text": "..." }
+app.post('/api/voice/speak', async (req, res) => {
+  const { text } = req.body;
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: '"text" requerido en el body.' });
+  }
+  // Non-blocking: fire and return 202 immediately
+  voice.speak(text.substring(0, 1000)).catch(e =>
+    console.error('[Voice] speak error:', e.message)
+  );
+  res.status(202).json({ success: true, chars: text.length });
 });
 
 app.get('/api/memory/analysis', async (req, res) => {

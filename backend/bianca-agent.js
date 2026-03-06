@@ -314,7 +314,7 @@ class BiancaAgent {
     }
 
     // ── System prompt (Jarvis + memory spec) ─────────────────────────────────
-    const systemPrompt = [
+    const _sysLines = [
       'Eres Bianca, asistente de escritorio local para Windows con voz activa. Responde SIEMPRE en español, texto plano sin asteriscos ni markdown.',
       '',
       'IDENTIDAD Y ROL:',
@@ -356,7 +356,20 @@ class BiancaAgent {
       '- Para solicitudes de análisis de memoria, devuelve la clasificación y usa create_file para guardar el informe.',
       '- Nunca respondas SOLO con ACCIONES: sin texto previo.',
       '- Si la tarea ya está completa, responde directamente sin incluir ACCIONES.'
-    ].join('\n');
+    ];
+
+    // En modo voz el usuario escucha la respuesta — ser breve y natural
+    if (options.voiceMode) {
+      _sysLines.push(
+        '',
+        'MODO VOZ ACTIVO — el usuario escucha la respuesta, no la lee:',
+        '- Sé breve y natural. Sin listas numeradas, sin código, sin markdown.',
+        '- Conversación casual: máximo 2-3 oraciones concisas.',
+        '- Para tareas ejecutadas: confirma brevemente el resultado.',
+        '- Usa lenguaje coloquial, pensado para escuchar, no para leer.'
+      );
+    }
+    const systemPrompt = _sysLines.join('\n');
 
     // ── First user message ────────────────────────────────────────
     const firstContent = initialScreenshot
