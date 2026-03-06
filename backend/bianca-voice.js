@@ -600,7 +600,23 @@ class BiancaVoice extends EventEmitter {
 
   // ── Private: TTS ─────────────────────────────────────────────────────────────
 
+  /** Strip markdown formatting so TTS doesn't say "asterisco asterisco". */
+  _sanitizeForTts(text) {
+    return text
+      .replace(/\*\*(.*?)\*\*/gs, '$1')          // **bold**
+      .replace(/\*(.*?)\*/gs, '$1')                // *italic*
+      .replace(/`{1,3}[^`]*`{1,3}/gs, '')         // `code` / ```block```
+      .replace(/#{1,6}\s+/g, '')                   // ## headings
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')   // [text](url)
+      .replace(/[_~>|\\]/g, '')                    // leftover markdown chars
+      .replace(/ {2,}/g, ' ')                       // collapse extra spaces
+      .trim();
+  }
+
   async _ttsSay(text) {
+    // Strip markdown before speaking
+    text = this._sanitizeForTts(text);
+    if (!text) return;
     // Prefer neural edge-tts if available
     if (IS_WINDOWS && this.opts.neuralTtsVoice && fs.existsSync(TTS_SCRIPT)) {
       return this._ttsNeural(text);
@@ -616,9 +632,8 @@ class BiancaVoice extends EventEmitter {
       const rate   = `+${Math.max(-50, Math.min(50, Number(this.opts.ttsRate) * 5))}%`;
       const volume = `+0%`;
 
-      // Pass text as last argument(s) — joined back in tts_speak.py
-      // Split into words to avoid shell quoting issues via spawn (not exec)
-      const args = [TTS_SCRIPT, voice, rate, volume, ...text.split(' ')];
+      // Pass text as a single argument — spawn() sends it directly without shell parsing
+      const args = [TTS_SCRIPT, voice, rate, volume, text];
 
       const proc = spawn(PYTHON_PATH, args, { windowsHide: true });
 

@@ -446,9 +446,10 @@ class BiancaAgent {
           'x-api-key':       ANTHROPIC_API_KEY
         }
       }, (res) => {
-        let data = '';
-        res.on('data', (c) => { data += c.toString(); });
+        const chunks = [];
+        res.on('data', (c) => { chunks.push(c); });
         res.on('end', () => {
+          const data = Buffer.concat(chunks).toString('utf8');
           try {
             const parsed = JSON.parse(data);
             if (parsed.error) { resolve(`Error API: ${parsed.error.message}`); return; }

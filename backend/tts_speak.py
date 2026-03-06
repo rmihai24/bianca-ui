@@ -49,6 +49,6 @@ if __name__ == '__main__':
     voice  = sys.argv[1]
     rate   = sys.argv[2]
     volume = sys.argv[3]
-    text   = ' '.join(sys.argv[4:])
+    text   = sys.argv[4]  # single arg — passed directly by spawn(), no shell splitting
 
     asyncio.run(speak(voice, rate, volume, text))
