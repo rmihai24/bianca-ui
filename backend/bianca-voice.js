@@ -52,6 +52,7 @@ function _resolvePythonPath() {
 
 const PYTHON_PATH = _resolvePythonPath();
 const MIC_SCRIPT  = path.join(__dirname, 'mic_capture.py');
+const TTS_SCRIPT  = path.join(__dirname, 'tts_speak.py');
 
 // ── Paths (resolved relative to this file) ────────────────────────────────────
 // bianca-voice.js lives in bianca-ui/backend/
@@ -239,8 +240,17 @@ class BiancaVoice extends EventEmitter {
       // Windows SAPI rate: -10 (slowest) to +10 (fastest), 0 = normal
       // Linux espeak wpm : pass wpm directly (e.g. 150)
       ttsVolume        : options.ttsVolume !== undefined ? options.ttsVolume : 90,
-      ttsVoice         : options.ttsVoice  || '',   // '' = OS default voice
+      ttsVoice         : options.ttsVoice  || 'Microsoft Helena Desktop',  // es-ES female (SAPI fallback)
+      // Neural TTS via edge-tts Python — much higher quality
+      // Set to null/'' to use SAPI fallback
+      neuralTtsVoice   : options.neuralTtsVoice !== undefined
+                           ? options.neuralTtsVoice
+                           : 'es-ES-ElviraNeural',
       maxTtsChunk      : options.maxTtsChunk || 200, // chars before splitting
+
+      // Microphone device — index (number/string) or name substring
+      // Leave null for auto-detection (first device supporting target rate)
+      micDevice    : options.micDevice !== undefined ? options.micDevice : null,
 
       // Misc
       logEnabled   : options.logEnabled !== false,
@@ -273,23 +283,12 @@ class BiancaVoice extends EventEmitter {
     }
 
     // Check Python + mic_capture.py availability
-    let micOk = false;
-    try {
-      const { execSync } = require('child_process');
-      execSync(`${PYTHON_PATH} -c "import sounddevice, numpy"`, {
-        timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
-      });
-      micOk = fs.existsSync(MIC_SCRIPT);
-      if (!micOk) {
-        this._log(`[WARN] mic_capture.py no encontrado en: ${MIC_SCRIPT}`, true);
-      } else {
-        this._log(`Micrófono: Python sounddevice OK (${PYTHON_PATH})`);
-      }
-    } catch {
-      this._log(
-        '[WARN] Micrófono no disponible. Requiere Python + sounddevice:\n' +
-        '  pip install sounddevice numpy', true
-      );
+    // PYTHON_PATH was already resolved at module load — just verify the script file exists
+    const micOk = fs.existsSync(MIC_SCRIPT);
+    if (!micOk) {
+      this._log(`[WARN] mic_capture.py no encontrado en: ${MIC_SCRIPT}`, true);
+    } else {
+      this._log(`Micrófono: Python sounddevice OK (${PYTHON_PATH})`);
     }
 
     // TTS info
@@ -408,7 +407,11 @@ class BiancaVoice extends EventEmitter {
     this._log(`Iniciando micrófono Python: ${PYTHON_PATH} ${MIC_SCRIPT} ${this.opts.sampleRate}`);
 
     try {
-      const proc = spawn(PYTHON_PATH, [MIC_SCRIPT, String(this.opts.sampleRate)], {
+      const args = [MIC_SCRIPT, String(this.opts.sampleRate)];
+      if (this.opts.micDevice !== null && this.opts.micDevice !== undefined) {
+        args.push(String(this.opts.micDevice));
+      }
+      const proc = spawn(PYTHON_PATH, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
@@ -598,7 +601,39 @@ class BiancaVoice extends EventEmitter {
   // ── Private: TTS ─────────────────────────────────────────────────────────────
 
   async _ttsSay(text) {
+    // Prefer neural edge-tts if available
+    if (IS_WINDOWS && this.opts.neuralTtsVoice && fs.existsSync(TTS_SCRIPT)) {
+      return this._ttsNeural(text);
+    }
     return IS_WINDOWS ? this._ttsWindows(text) : this._ttsLinux(text);
+  }
+
+  /** Neural TTS via edge-tts Python script (Microsoft Azure Neural voices). */
+  _ttsNeural(text) {
+    return new Promise((resolve) => {
+      const voice  = this.opts.neuralTtsVoice;
+      // edge-tts rate/volume are percentage offset strings: '+0%', '+10%'
+      const rate   = `+${Math.max(-50, Math.min(50, Number(this.opts.ttsRate) * 5))}%`;
+      const volume = `+0%`;
+
+      // Pass text as last argument(s) — joined back in tts_speak.py
+      // Split into words to avoid shell quoting issues via spawn (not exec)
+      const args = [TTS_SCRIPT, voice, rate, volume, ...text.split(' ')];
+
+      const proc = spawn(PYTHON_PATH, args, { windowsHide: true });
+
+      proc.stderr.on('data', d => {
+        const msg = d.toString().trim();
+        if (msg) this._log(`[tts] ${msg}`);
+      });
+
+      proc.on('close', () => resolve());
+      proc.on('error', (err) => {
+        this._log(`Error TTS neural: ${err.message} — fallback a SAPI`, true);
+        // Fallback to SAPI
+        this._ttsWindows(text).then(resolve);
+      });
+    });
   }
 
   /**
@@ -627,7 +662,8 @@ class BiancaVoice extends EventEmitter {
       lines.push(`$s.Speak('${safe}')`, '$s.Dispose()');
 
       const tmpFile = path.join(os.tmpdir(), `bv_tts_${Date.now()}.ps1`);
-      fs.writeFileSync(tmpFile, lines.join('\r\n'), 'utf8');
+      // Write with UTF-8 BOM so PowerShell 5.1 reads tildes/accents correctly
+      fs.writeFileSync(tmpFile, '\uFEFF' + lines.join('\r\n'), 'utf8');
 
       exec(
         `"${POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File "${tmpFile}"`,
